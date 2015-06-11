@@ -1,0 +1,731 @@
+#!/bin/bash
+########################################################################
+#
+# secli: unified frontend for SELinux 
+#
+# Copyright (C) 2015 Red Hat, Inc.
+# Copyright (C) 2015 Masatake YAMATO
+#
+# Author: Masatake YAMATO <yamato@redhat.com>
+#
+# program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+########################################################################
+
+REQUIRES="
+seinfo
+semanage
+"
+
+SUBCOMMANDS=$(
+    sort <<EOF
+list_classes
+list_permissions
+list_permissives
+list_types
+list_attributes
+list_roles
+list_users
+list_logins
+list_booleans
+list_pathcon
+initial_sids
+self_sid
+file_sid
+port_sid
+process_sid
+status
+boolean
+pathcon
+stat
+log
+EOF
+)
+
+declare -A ALIASES
+ALIASES["label"]="file_sid"
+ALIASES["fcontext"]="pathcon"
+ALIASES["portcon"]="port_sid"
+
+# TODO
+#
+# - chcon
+# - semanage fcontext
+# - restorecon
+
+# - runtime
+#   . seinfo
+#   . sesearch
+
+# - policy
+#   . source code
+#   . sepolicy
+
+#
+# Generic utils
+#
+function stderr
+{
+    echo "$@" 1>&2
+}
+
+function ierror
+{
+    logger --stderr "$0: [INTERNAL ERROR] $*"
+    exit 2
+}
+
+function message
+{
+    logger --stderr "$0: $*"
+}
+
+function verbose
+{
+    if true_p "$VERBOSE"; then
+	message "$@"
+    fi
+}
+
+function true_p
+{
+    case "$1" in
+	(yes|YES|Yes|1|true|TRUE|True|on)
+	    return 0
+	    ;;
+	(*)
+	    return 1
+	    ;;
+    esac
+}
+
+function false_p
+{
+    case "$1" in
+	(no|NO|No|0|false|False|FALSE|off)
+	    return 0
+	    ;;
+	(*)
+	    return 1
+	    ;;
+    esac
+}
+
+function function_p
+{
+    type -t "$1" > /dev/null 2>&1
+    return $?
+}
+
+function member
+{
+    local i;
+    local elt=$1
+    shift
+
+    for i in "$@"; do
+	if [[ "$elt" = "$i" ]]; then
+	    return 0
+	fi
+    done
+    return 1
+}
+
+function normalize
+{
+    tr "-" "_" <<< "$1"
+}
+
+function unnormalize
+{
+    tr "_" "-" <<< "$1"
+}
+
+
+function trim_prefix
+{
+    sed -e 's/^[[:space:]]*//'
+}
+
+function list_seinfo
+{
+    local opt=$1
+    local key=$2
+
+    if [[ -z "${opt}" ]]; then
+	ierror "$0: no option given\n"
+    fi
+    if [[ -z "${key}" ]]; then
+	ierror "$0: no trimming key given\n"
+    fi    
+	
+    seinfo ${opt} | grep -v ^${key} | grep -v '^$' | trim_prefix
+}
+
+#
+# LIST-USERS
+#
+function help_list_users
+{
+    printf "	list-users\n"
+}
+function run_list_users
+{
+    list_seinfo -u U
+}
+
+#
+# LIST-PATHCON
+#
+function help_list_pathcon
+{
+    printf "	list-pathcon\n"
+}
+function run_list_pathcon
+{
+    semanage fcontext -l
+}
+
+#
+# INITIAL-SIDS
+#
+function help_initial_sids
+{
+    printf "	initial-sids USER_u\n"
+}
+function run_initial_sids
+{
+    local u=$2
+    local d=/etc/selinux/targeted/contexts
+    
+    if [[ -z "$u" ]]; then
+	stderr "no USER_u is give"
+	exit 1
+    fi
+
+    if [[ -e ${d}/users/$u ]]; then
+	cat ${d}/users/$u
+    else
+	cat ${d}/default_contexts
+    fi
+}
+
+# ? /etc/selinux/targeted/contexts/default_type
+
+#
+# SELF-SID
+#
+function help_self_sid
+{
+    printf "	self-sid\n"
+}
+
+function run_self_sid
+{
+    id -Z
+}
+
+#
+# FILE-SID
+#
+function help_file_sid
+{
+    printf "	file-sid PATH\n"
+}
+
+function run_file_sid
+{
+    local cmd=$1
+    local f=$2
+
+    if [[ -z "$f" ]]; then
+	stderr "$cmd: no FILE is give"
+	exit 1
+    elif [[ ! -e "$f" ]]; then
+	stderr "$cmd: no such file: $f"
+	exit 1
+    elif [[ -d "$f" ]]; then
+	ls -d --scontext $f
+    else
+	ls --scontext $f
+    fi
+}
+
+#
+# STATUS
+#
+function help_status
+{
+    printf "	status\n"
+}
+
+function run_status
+{
+    sestatus
+}
+
+#
+# LIST-BOOLEANS
+#
+function help_list_booleans
+{
+    printf "	list-booleans [--long|-l [--customized|-C]\\n"
+}
+
+function run_list_booleans
+{
+    local cmd=$1
+    shift
+    
+    local customized=
+    local long=
+
+    while [[ $# -gt 0 ]]; do
+	case "$1" in
+	    (--long|-l)
+		long=1
+		;;
+	    (-C|--customized)
+		customized=-C
+		;;
+	    (*)
+		stderr "$cmd: unknown option: $1"
+		exit 1
+		;;
+	esac
+	shift
+    done
+
+    if [[ -z "${long}" ]] && [[ -n "$customized" ]]; then
+	stderr "$cmd: --customized|-C option must be specified with --long|-l option"
+	exit 1
+    fi
+
+    if [[ -n "${long}" ]]; then
+	semanage boolean -n -l $customized
+    else
+	getsebool -a
+    fi
+}
+
+#
+# BOOLEAN
+#
+function help_boolean
+{
+    printf "	boolean VAR\n"
+}
+
+function run_boolean
+{
+    local cmd=$1
+    shift
+    local var=$1
+
+    if [[ -z "${var}" ]]; then
+	stderr "$cmd: no VAR given\n"
+	exit 1
+    fi
+
+    getsebool $var
+}
+
+#
+# PATHCON
+#
+function help_pathcon
+{
+    printf "	pathcon PATH\n"
+}
+
+
+function run_pathcon
+{
+    local cmd=$1
+    shift
+    local path=$1
+
+    if [[ -z "${path}" ]]; then
+	stderr "$cmd: no PATH given\n"
+	exit 1
+    fi
+
+    matchpathcon $path
+}
+
+#
+# STAT
+#
+function help_stat
+{
+    printf "	stat\n"
+}
+
+
+function run_stat
+{
+    avcstat
+}
+
+#
+# LIST-ROLES
+#
+function help_list_roles
+{
+    printf "	list-roles [USER_u]\n"
+}
+
+function run_list_roles
+{
+    local cmd=$1
+    local user=$2
+
+    if [[ -z "${user}" ]]; then
+	list_seinfo -r R
+    else
+	seinfo "-u${user}" -x \
+	    | grep -v "^   ${user}" \
+	    | grep -v "^      [a-zA-Z].*" \
+	    | trim_prefix
+    fi
+}
+
+#
+# LIST-CLASSES
+#
+function help_list_classes
+{
+    printf "	list-classes\n"
+}
+
+function run_list_classes
+{
+    list_seinfo -c O
+}
+
+#
+# LIST-TYPES
+#
+function help_list_types
+{
+    printf "	list-types [ROLE_r]\n"
+}
+
+function run_list_types
+{
+    local cmd=$1
+    set +o nounset
+    local role=$2
+
+    if [[ -z "${role}" ]]; then
+	set -o nounset
+	list_seinfo -t T
+    else
+	seinfo "-r${role}" -x \
+	    | grep -v "^   ${role}" \
+	    | grep -v "^      [a-zA-Z].*" \
+	    | trim_prefix
+    fi
+}
+
+#
+# LIST-ATTRIBUTES
+#
+function help_list_attributes
+{
+    printf "	list-attributes [TYPE_t]\n"
+}
+
+function run_list_attributes
+{
+    local cmd=$1
+    set +o nounset
+    local type=$2
+    local REPLY
+    
+    if [[ -z "${type}" ]]; then
+	list_seinfo -a A
+    else
+	seinfo "-t${type}" -x | while read REPLY; do
+	    if [[ "$REPLY" = "Aliases" ]]; then
+		break
+	    elif [[ "$REPLY" = "${type}" ]]; then
+		continue
+	    else
+		echo $REPLY
+	    fi
+	done
+    fi
+}
+
+#
+# LIST-PERMISSIONS
+#
+function help_list_permissions
+{
+    printf "	list-permissions CLASS\n"
+}
+
+function run_list_permissions
+{
+    local cmd=$1
+    local class=$2
+
+    if [[ -z "${class}" ]]; then
+	stderr "$cmd: no CLASS given\n"
+	exit 1
+    fi
+    
+    seinfo -c$class -x | grep -v "^   $class" | trim_prefix | sort
+}
+
+#
+# LIST-PERMISSIVES
+#
+function help_list_permissives
+{
+    printf "	list-permissives\n"
+}
+
+function run_list_permissives
+{
+    semanage permissive -l
+}
+
+
+
+#
+# PORT-SID
+#
+function help_port_sid
+{
+    printf "	port-sid PORTNUM\n"
+}
+
+function run_port_sid
+{
+    local cmd=$1
+    local port=$2
+
+    if [[ -z "$port" ]]; then
+	stderr "$cmd: no PORTNUM is give"
+	exit 1
+    else
+	seinfo --portcon=$port
+    fi
+}
+
+#
+# PROCESS-SID
+#
+function help_process_sid
+{
+    printf "	process-sid PID\n"
+}
+
+function run_process_sid
+{
+    local cmd=$1
+    local pid=$2
+
+    if [[ -z "$pid" ]]; then
+	stderr "$cmd: no PID is give"
+	exit 1
+    else
+	ps -Z -p $pid
+    fi
+}
+
+#
+# LOG
+#
+function help_log
+{
+    printf "	log [--tail|-f][--all|-a]\n"
+}
+
+function run_log
+{
+    local cmd=$1
+    shift
+    local tail=
+    local all=
+    
+    while [[ $# -gt 0 ]]; do
+	case "$1" in
+	    (--tail|-f)
+		tail=1
+		;;
+	    (--all|-a)
+		all=1
+		;;
+	    (*)
+		stderr "$cmd: unknown option: $1"
+		exit 1
+		;;
+	esac
+	shift
+    done
+
+    if [[ -n "${tail}" ]]; then
+	tail -f /var/log/audit/audit.log 
+    else
+	cat /var/log/audit/audit.log
+    fi | if [[ -n "${all}" ]]; then
+	cat
+    else
+	grep AVC
+    fi
+}
+
+#
+# LIST-LOGINS
+#
+function help_list_logins
+{
+    printf "	list-logins\n"
+}
+
+function run_list_logins
+{
+    sudo semanage login -l -n
+}
+
+#
+# HELP
+#
+function help_help
+{
+    printf "	help [SUBCOMMAND]\n"
+}
+
+function run_help
+{
+    local c
+    local f
+    local s
+
+    shift
+
+    set +o nounset
+    c=$1
+    set -o nounset
+
+    if [[ -n "$c" ]]; then
+	if member "$c" $SUBCOMMANDS; then
+	    f=$(normalize "help_$c")
+	    s=$(normalize "$c")
+	    if function_p "$f"; then
+		"$f"
+		return 0
+	    else
+		message "$FUNCNAME: help for the subcommand($c) is not available"
+		return 1
+	    fi
+	else
+	    message "no such subcommand: $c"
+	    return 1
+	fi
+    fi
+
+    printf "Usage:\n\n"
+    printf "       $0 --help|-h\n"
+    printf "       $0 [OPTION...] SUBCOMMAND [ARGS...]\n\n"
+
+    printf "  Options:\n"
+    printf "	%s\n		%s\n" --verbose "print extra messages about internal operation"
+    echo
+
+    printf "  Subcommand summary:\n"
+    for c in ${SUBCOMMANDS}; do
+	printf "	%s\n" $(unnormalize $c)
+    done
+
+    echo
+    printf "  Subcommand detail:\n"
+    for c in ${SUBCOMMANDS}; do
+	f=$(normalize "help_$c")
+	if function_p "$f"; then
+	    "$f"
+	fi
+    done
+
+    echo
+    printf "  Subcommand aliases:\n"
+    for c in ${!ALIASES[@]}; do
+	printf "	%-15s -> %15s\n" $c ${ALIASES[$c]}
+    done
+
+    return 0
+}
+
+function main
+{
+    local alias
+    local original
+    
+    set +o nounset
+    case "$1" in
+	(-h|--help)
+	    shift
+	    run_help help "$@"
+	    return 0
+	    ;;
+	(--verbose)
+	    VERBOSE=1
+	    shift
+	    ;;
+	(-*)
+	    stderr "unknown option: $1"
+	    return 1
+	    ;;
+    esac
+
+    if [[ -z "$1" ]]; then
+	stderr "no subcommand given"
+	run_help help 1>&2
+	return 1
+    else
+	subcommand=$1
+    fi
+
+    alias=${ALIASES[$subcommand]}
+    if [[ -n "${alias}" ]]; then
+	original=${subcommand}
+	subcommand=$alias
+    else
+	original=${subcommand}
+    fi
+
+    set -o nounset
+    
+    if ! member $(normalize "$subcommand") $SUBCOMMANDS; then
+	stderr "no such subcommand: $subcommand"
+	run_help help 1>&2
+	return 1
+    fi
+
+    subcommand=$(normalize "$subcommand")
+    f=run_$subcommand
+    if function_p $f; then
+	shift
+	"$f" "${original}" "$@"
+	return $?
+    else
+	message "$FUNCNAME: run_$subcommand is not implemented not yet"
+	return 1
+    fi
+}
+
+main "$@"
